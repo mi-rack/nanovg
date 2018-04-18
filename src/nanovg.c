@@ -38,8 +38,8 @@
 #define NVG_MAX_FONTIMAGE_SIZE   2048
 #define NVG_MAX_FONTIMAGES       4
 
-#define NVG_INIT_COMMANDS_SIZE 256
-#define NVG_INIT_POINTS_SIZE 128
+#define NVG_INIT_COMMANDS_SIZE 256000
+#define NVG_INIT_POINTS_SIZE 128000
 #define NVG_INIT_PATHS_SIZE 16
 #define NVG_INIT_VERTS_SIZE 256
 #define NVG_MAX_STATES 32
@@ -129,6 +129,7 @@ struct NVGcontext {
 	int fillTriCount;
 	int strokeTriCount;
 	int textTriCount;
+	int allowMergeSubpaths;
 };
 
 static float nvg__sqrtf(float a) { return sqrtf(a); }
@@ -1827,8 +1828,139 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, int lineCap, int lineJoin
 	return 1;
 }
 
+static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float miterLimit)
+{
+	NVGpathCache* cache = ctx->cache;
+	NVGvertex* verts;
+	NVGvertex* dst;
+	int cverts, convex, i, j;
+	float aa = ctx->fringeWidth;
+	int fringe = w > 0.0f;
+
+	nvg__calculateJoins(ctx, w, lineJoin, miterLimit);
+
+	// Calculate max vertex usage.
+	cverts = 0;
+	for (i = 0; i < cache->npaths; i++) {
+		NVGpath* path = &cache->paths[i];
+		cverts += path->count*3 + path->nbevel + 1;
+		if (fringe)
+			cverts += (path->count + path->nbevel*5 + 1) * 2; // plus one for loop
+	}
+
+	verts = nvg__allocTempVerts(ctx, cverts);
+	if (verts == NULL) return 0;
+
+	convex = cache->npaths == 1 && cache->paths[0].convex;
+dst=verts;
+	for (i = 0; i < cache->npaths; i++) {
+		NVGpath* path = &cache->paths[i];
+		NVGpoint* pts = &cache->points[path->first];
+		NVGpoint* p0;
+		NVGpoint* p1;
+		float rw, lw, woff;
+		float ru, lu;
+
+		// Calculate shape vertices.
+		woff = 0.5f*aa;
+		// dst = verts;
+		path->fill = dst;
+
+		if (0&&fringe) {
+			// Looping
+			p0 = &pts[path->count-1];
+			p1 = &pts[0];
+			for (j = 0; j < path->count; ++j) {
+				if (p1->flags & NVG_PT_BEVEL) {
+					float dlx0 = p0->dy;
+					float dly0 = -p0->dx;
+					float dlx1 = p1->dy;
+					float dly1 = -p1->dx;
+					if (p1->flags & NVG_PT_LEFT) {
+						float lx = p1->x + p1->dmx * woff;
+						float ly = p1->y + p1->dmy * woff;
+						nvg__vset(dst, lx, ly, 0.5f,1); dst++;
+					} else {
+						float lx0 = p1->x + dlx0 * woff;
+						float ly0 = p1->y + dly0 * woff;
+						float lx1 = p1->x + dlx1 * woff;
+						float ly1 = p1->y + dly1 * woff;
+						nvg__vset(dst, lx0, ly0, 0.5f,1); dst++;
+						nvg__vset(dst, lx1, ly1, 0.5f,1); dst++;
+					}
+				} else {
+					nvg__vset(dst, p1->x + (p1->dmx * woff), p1->y + (p1->dmy * woff), 0.5f,1); dst++;
+				}
+				p0 = p1++;
+			}
+		} else {
+			for (j = 2; j < path->count; ++j) {
+				nvg__vset(dst+0, pts[0].x, pts[0].y, 0.5f,1);
+				nvg__vset(dst+1, pts[j-1].x, pts[j-1].y, 0.5f,1);
+				nvg__vset(dst+2, pts[j].x, pts[j].y, 0.5f,1);
+				dst+=3;
+			}
+		}
+
+		path->nfill = (int)(dst - verts);
+		//verts = dst;
+
+		// Calculate fringe
+		if (0&&fringe) {
+			lw = w + woff;
+			rw = w - woff;
+			lu = 0;
+			ru = 1;
+			dst = verts;
+			path->stroke = dst;
+
+			// Create only half a fringe for convex shapes so that
+			// the shape can be rendered without stenciling.
+			if (convex) {
+				lw = woff;	// This should generate the same vertex as fill inset above.
+				lu = 0.5f;	// Set outline fade at middle.
+			}
+
+			// Looping
+			p0 = &pts[path->count-1];
+			p1 = &pts[0];
+
+			for (j = 0; j < path->count; ++j) {
+				if ((p1->flags & (NVG_PT_BEVEL | NVG_PR_INNERBEVEL)) != 0) {
+					dst = nvg__bevelJoin(dst, p0, p1, lw, rw, lu, ru, ctx->fringeWidth);
+				} else {
+					nvg__vset(dst, p1->x + (p1->dmx * lw), p1->y + (p1->dmy * lw), lu,1); dst++;
+					nvg__vset(dst, p1->x - (p1->dmx * rw), p1->y - (p1->dmy * rw), ru,1); dst++;
+				}
+				p0 = p1++;
+			}
+
+			// Loop it
+			nvg__vset(dst, verts[0].x, verts[0].y, lu,1); dst++;
+			nvg__vset(dst, verts[1].x, verts[1].y, ru,1); dst++;
+
+			path->nstroke = (int)(dst - verts);
+			verts = dst;
+		} else {
+			path->stroke = NULL;
+			path->nstroke = 0;
+		}
+	}
+
+	cache->npaths = 1;
+	cache->paths[0].nfill = (int)(dst - verts);
+	//cache->paths[0].convex = 1;
+
+	return 1;
+}
+
 static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLimit)
 {
+	if (ctx->allowMergeSubpaths)
+	{
+		return nvg__expandFillMerge(ctx, w, lineJoin, miterLimit);
+	}
+
 	NVGpathCache* cache = ctx->cache;
 	NVGvertex* verts;
 	NVGvertex* dst;
@@ -1947,12 +2079,17 @@ static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLi
 	return 1;
 }
 
-
 // Draw
 void nvgBeginPath(NVGcontext* ctx)
 {
 	ctx->ncommands = 0;
 	nvg__clearPathCache(ctx);
+	ctx->allowMergeSubpaths = 0;
+}
+
+void nvgAllowMergeSubpaths(NVGcontext* ctx)
+{
+	ctx->allowMergeSubpaths = 1;
 }
 
 void nvgMoveTo(NVGcontext* ctx, float x, float y)
@@ -2219,8 +2356,11 @@ void nvgFill(NVGcontext* ctx)
 	fillPaint.innerColor.a *= state->alpha;
 	fillPaint.outerColor.a *= state->alpha;
 
-	ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
-						   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+	if (ctx->allowMergeSubpaths)
+		ctx->params.renderTriangles(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->cache->paths[0].fill, ctx->cache->paths[0].nfill);
+	else
+		ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
+							   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
 
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {

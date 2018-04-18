@@ -124,7 +124,8 @@ enum GLNVGshaderType {
 	NSVG_SHADER_FILLGRAD,
 	NSVG_SHADER_FILLIMG,
 	NSVG_SHADER_SIMPLE,
-	NSVG_SHADER_IMG
+	NSVG_SHADER_IMG,
+	NSVG_SHADER_FILLSIMPLE
 };
 
 #if NANOVG_GL_USE_UNIFORMBUFFER
@@ -229,7 +230,7 @@ struct GLNVGfragUniforms {
 typedef struct GLNVGfragUniforms GLNVGfragUniforms;
 
 struct GLNVGcontext {
-	GLNVGshader shader;
+	GLNVGshader shader[5];
 	GLNVGtexture* textures;
 	float view[2];
 	int ntextures;
@@ -351,34 +352,30 @@ static GLNVGtexture* glnvg__allocTexture(GLNVGcontext* gl)
 	for (i = 0; i < gl->ntextures; i++) {
 		if (gl->textures[i].id == 0) {
 			tex = &gl->textures[i];
-			break;
+			memset(tex, 0, sizeof(*tex));
+			tex->id = i+1;
+			return tex;
 		}
 	}
-	if (tex == NULL) {
-		if (gl->ntextures+1 > gl->ctextures) {
-			GLNVGtexture* textures;
-			int ctextures = glnvg__maxi(gl->ntextures+1, 4) +  gl->ctextures/2; // 1.5x Overallocate
-			textures = (GLNVGtexture*)realloc(gl->textures, sizeof(GLNVGtexture)*ctextures);
-			if (textures == NULL) return NULL;
-			gl->textures = textures;
-			gl->ctextures = ctextures;
-		}
-		tex = &gl->textures[gl->ntextures++];
+	if (gl->ntextures+1 > gl->ctextures) {
+		GLNVGtexture* textures;
+		int ctextures = glnvg__maxi(gl->ntextures+1, 4) +  gl->ctextures/2; // 1.5x Overallocate
+		textures = (GLNVGtexture*)realloc(gl->textures, sizeof(GLNVGtexture)*ctextures);
+		if (textures == NULL) return NULL;
+		gl->textures = textures;
+		gl->ctextures = ctextures;
 	}
+	tex = &gl->textures[gl->ntextures++];
 
 	memset(tex, 0, sizeof(*tex));
-	tex->id = ++gl->textureId;
+	tex->id = gl->ntextures;
 
 	return tex;
 }
 
 static GLNVGtexture* glnvg__findTexture(GLNVGcontext* gl, int id)
 {
-	int i;
-	for (i = 0; i < gl->ntextures; i++)
-		if (gl->textures[i].id == id)
-			return &gl->textures[i];
-	return NULL;
+	return &gl->textures[id-1];
 }
 
 static int glnvg__deleteTexture(GLNVGcontext* gl, int id)
@@ -673,18 +670,494 @@ static int glnvg__renderCreate(void* uptr)
 		"#endif\n"
 		"}\n";
 
+	static const char* fillFragShader0 =
+		"#ifdef GL_ES\n"
+		"#if defined(GL_FRAGMENT_PRECISION_HIGH) || defined(NANOVG_GL3)\n"
+		" precision highp float;\n"
+		"#else\n"
+		" precision mediump float;\n"
+		"#endif\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"#ifdef USE_UNIFORMBUFFER\n"
+		"	layout(std140) uniform frag {\n"
+		"		mat3 scissorMat;\n"
+		"		mat3 paintMat;\n"
+		"		vec4 innerCol;\n"
+		"		vec4 outerCol;\n"
+		"		vec2 scissorExt;\n"
+		"		vec2 scissorScale;\n"
+		"		vec2 extent;\n"
+		"		float radius;\n"
+		"		float feather;\n"
+		"		float strokeMult;\n"
+		"		float strokeThr;\n"
+		"		int texType;\n"
+		"		int type;\n"
+		"	};\n"
+		"#else\n" // NANOVG_GL3 && !USE_UNIFORMBUFFER
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"#endif\n"
+		"	uniform sampler2D tex;\n"
+		"	in vec2 ftcoord;\n"
+		"	in vec2 fpos;\n"
+		"	out vec4 outColor;\n"
+		"#else\n" // !NANOVG_GL3
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"	uniform sampler2D tex;\n"
+		"	varying vec2 ftcoord;\n"
+		"	varying vec2 fpos;\n"
+		"#endif\n"
+		"#ifndef USE_UNIFORMBUFFER\n"
+		"	#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)\n"
+		"	#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)\n"
+		"	#define innerCol frag[6]\n"
+		"	#define outerCol frag[7]\n"
+		"	#define scissorExt frag[8].xy\n"
+		"	#define scissorScale frag[8].zw\n"
+		"	#define extent frag[9].xy\n"
+		"	#define radius frag[9].z\n"
+		"	#define feather frag[9].w\n"
+		"	#define strokeMult frag[10].x\n"
+		"	#define strokeThr frag[10].y\n"
+		"	#define texType int(frag[10].z)\n"
+		"	#define type int(frag[10].w)\n"
+		"#endif\n"
+		"\n"
+		"float sdroundrect(vec2 pt, vec2 ext, float rad) {\n"
+		"	vec2 ext2 = ext - vec2(rad,rad);\n"
+		"	vec2 d = abs(pt) - ext2;\n"
+		"	return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - rad;\n"
+		"}\n"
+		"\n"
+		"// Scissoring\n"
+		"float scissorMask(vec2 p) {\n"
+		"	vec2 sc = (abs((scissorMat * vec3(p,1.0)).xy) - scissorExt);\n"
+		"	sc = vec2(0.5,0.5) - sc * scissorScale;\n"
+		"	return clamp(sc.x,0.0,1.0) * clamp(sc.y,0.0,1.0);\n"
+		"}\n"
+		"#ifdef EDGE_AA\n"
+		"// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.\n"
+		"float strokeMask() {\n"
+		"	return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);\n"
+		"}\n"
+		"#endif\n"
+		"\n"
+		"void main(void) {\n"
+		"   vec4 result;\n"
+		"	float scissor = scissorMask(fpos);\n"
+		"#ifdef EDGE_AA\n"
+		"	float strokeAlpha = strokeMask();\n"
+		"	if (strokeAlpha < strokeThr) discard;\n"
+		"#else\n"
+		"	float strokeAlpha = 1.0;\n"
+		"#endif\n"
+		"		// Calculate gradient color using box gradient\n"
+		"		vec2 pt = (paintMat * vec3(fpos,1.0)).xy;\n"
+		"		float d = clamp((sdroundrect(pt, extent, radius) + feather*0.5) / feather, 0.0, 1.0);\n"
+		"		vec4 color = mix(innerCol,outerCol,d);\n"
+		"		// Combine alpha\n"
+		"		color *= strokeAlpha * scissor;\n"
+		"		result = color;\n"
+		"#ifdef NANOVG_GL3\n"
+		"	outColor = result;\n"
+		"#else\n"
+		"	gl_FragColor = result;\n"
+		"#endif\n"
+		"}\n";
+
+	static const char* fillFragShader1 =
+		"#ifdef GL_ES\n"
+		"#if defined(GL_FRAGMENT_PRECISION_HIGH) || defined(NANOVG_GL3)\n"
+		" precision highp float;\n"
+		"#else\n"
+		" precision mediump float;\n"
+		"#endif\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"#ifdef USE_UNIFORMBUFFER\n"
+		"	layout(std140) uniform frag {\n"
+		"		mat3 scissorMat;\n"
+		"		mat3 paintMat;\n"
+		"		vec4 innerCol;\n"
+		"		vec4 outerCol;\n"
+		"		vec2 scissorExt;\n"
+		"		vec2 scissorScale;\n"
+		"		vec2 extent;\n"
+		"		float radius;\n"
+		"		float feather;\n"
+		"		float strokeMult;\n"
+		"		float strokeThr;\n"
+		"		int texType;\n"
+		"		int type;\n"
+		"	};\n"
+		"#else\n" // NANOVG_GL3 && !USE_UNIFORMBUFFER
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"#endif\n"
+		"	uniform sampler2D tex;\n"
+		"	in vec2 ftcoord;\n"
+		"	in vec2 fpos;\n"
+		"	out vec4 outColor;\n"
+		"#else\n" // !NANOVG_GL3
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"	uniform sampler2D tex;\n"
+		"	varying vec2 ftcoord;\n"
+		"	varying vec2 fpos;\n"
+		"#endif\n"
+		"#ifndef USE_UNIFORMBUFFER\n"
+		"	#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)\n"
+		"	#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)\n"
+		"	#define innerCol frag[6]\n"
+		"	#define outerCol frag[7]\n"
+		"	#define scissorExt frag[8].xy\n"
+		"	#define scissorScale frag[8].zw\n"
+		"	#define extent frag[9].xy\n"
+		"	#define radius frag[9].z\n"
+		"	#define feather frag[9].w\n"
+		"	#define strokeMult frag[10].x\n"
+		"	#define strokeThr frag[10].y\n"
+		"	#define texType int(frag[10].z)\n"
+		"	#define type int(frag[10].w)\n"
+		"#endif\n"
+		"\n"
+		"// Scissoring\n"
+		"float scissorMask(vec2 p) {\n"
+		"	vec2 sc = (abs((scissorMat * vec3(p,1.0)).xy) - scissorExt);\n"
+		"	sc = vec2(0.5,0.5) - sc * scissorScale;\n"
+		"	return clamp(sc.x,0.0,1.0) * clamp(sc.y,0.0,1.0);\n"
+		"}\n"
+		"#ifdef EDGE_AA\n"
+		"// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.\n"
+		"float strokeMask() {\n"
+		"	return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);\n"
+		"}\n"
+		"#endif\n"
+		"\n"
+		"void main(void) {\n"
+		"   vec4 result;\n"
+		"	float scissor = scissorMask(fpos);\n"
+		"#ifdef EDGE_AA\n"
+		"	float strokeAlpha = strokeMask();\n"
+		"	if (strokeAlpha < strokeThr) discard;\n"
+		"#else\n"
+		"	float strokeAlpha = 1.0;\n"
+		"#endif\n"
+		"		// Calculate color fron texture\n"
+		"		vec2 pt = (paintMat * vec3(fpos,1.0)).xy / extent;\n"
+		"#ifdef NANOVG_GL3\n"
+		"		vec4 color = texture(tex, pt);\n"
+		"#else\n"
+		"		vec4 color = texture2D(tex, pt);\n"
+		"#endif\n"
+		"		if (texType == 1) color = vec4(color.xyz*color.w,color.w);"
+		"		if (texType == 2) color = vec4(color.x);"
+		"		// Apply color tint and alpha.\n"
+		"		color *= innerCol;\n"
+		"		// Combine alpha\n"
+		"		color *= strokeAlpha * scissor;\n"
+		"		result = color;\n"
+		"#ifdef NANOVG_GL3\n"
+		"	outColor = result;\n"
+		"#else\n"
+		"	gl_FragColor = result;\n"
+		"#endif\n"
+		"}\n";
+
+	static const char* fillFragShader2 =
+		"#ifdef GL_ES\n"
+		"#if defined(GL_FRAGMENT_PRECISION_HIGH) || defined(NANOVG_GL3)\n"
+		" precision highp float;\n"
+		"#else\n"
+		" precision mediump float;\n"
+		"#endif\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"#ifdef USE_UNIFORMBUFFER\n"
+		"	layout(std140) uniform frag {\n"
+		"		mat3 scissorMat;\n"
+		"		mat3 paintMat;\n"
+		"		vec4 innerCol;\n"
+		"		vec4 outerCol;\n"
+		"		vec2 scissorExt;\n"
+		"		vec2 scissorScale;\n"
+		"		vec2 extent;\n"
+		"		float radius;\n"
+		"		float feather;\n"
+		"		float strokeMult;\n"
+		"		float strokeThr;\n"
+		"		int texType;\n"
+		"		int type;\n"
+		"	};\n"
+		"#else\n" // NANOVG_GL3 && !USE_UNIFORMBUFFER
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"#endif\n"
+		"	uniform sampler2D tex;\n"
+		"	in vec2 ftcoord;\n"
+		"	in vec2 fpos;\n"
+		"	out vec4 outColor;\n"
+		"#else\n" // !NANOVG_GL3
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"	uniform sampler2D tex;\n"
+		"	varying vec2 ftcoord;\n"
+		"	varying vec2 fpos;\n"
+		"#endif\n"
+		"#ifndef USE_UNIFORMBUFFER\n"
+		"	#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)\n"
+		"	#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)\n"
+		"	#define innerCol frag[6]\n"
+		"	#define outerCol frag[7]\n"
+		"	#define scissorExt frag[8].xy\n"
+		"	#define scissorScale frag[8].zw\n"
+		"	#define extent frag[9].xy\n"
+		"	#define radius frag[9].z\n"
+		"	#define feather frag[9].w\n"
+		"	#define strokeMult frag[10].x\n"
+		"	#define strokeThr frag[10].y\n"
+		"	#define texType int(frag[10].z)\n"
+		"	#define type int(frag[10].w)\n"
+		"#endif\n"
+		"\n"
+		"#ifdef EDGE_AA\n"
+		"// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.\n"
+		"float strokeMask() {\n"
+		"	return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);\n"
+		"}\n"
+		"#endif\n"
+		"\n"
+		"void main(void) {\n"
+		"   vec4 result;\n"
+		"#ifdef EDGE_AA\n"
+		"	float strokeAlpha = strokeMask();\n"
+		"	if (strokeAlpha < strokeThr) discard;\n"
+		"#else\n"
+		"	float strokeAlpha = 1.0;\n"
+		"#endif\n"
+		"		result = vec4(1,1,1,1);\n"
+		"#ifdef NANOVG_GL3\n"
+		"	outColor = result;\n"
+		"#else\n"
+		"	gl_FragColor = result;\n"
+		"#endif\n"
+		"}\n";
+
+	static const char* fillFragShader3 =
+		"#ifdef GL_ES\n"
+		"#if defined(GL_FRAGMENT_PRECISION_HIGH) || defined(NANOVG_GL3)\n"
+		" precision highp float;\n"
+		"#else\n"
+		" precision mediump float;\n"
+		"#endif\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"#ifdef USE_UNIFORMBUFFER\n"
+		"	layout(std140) uniform frag {\n"
+		"		mat3 scissorMat;\n"
+		"		mat3 paintMat;\n"
+		"		vec4 innerCol;\n"
+		"		vec4 outerCol;\n"
+		"		vec2 scissorExt;\n"
+		"		vec2 scissorScale;\n"
+		"		vec2 extent;\n"
+		"		float radius;\n"
+		"		float feather;\n"
+		"		float strokeMult;\n"
+		"		float strokeThr;\n"
+		"		int texType;\n"
+		"		int type;\n"
+		"	};\n"
+		"#else\n" // NANOVG_GL3 && !USE_UNIFORMBUFFER
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"#endif\n"
+		"	uniform sampler2D tex;\n"
+		"	in vec2 ftcoord;\n"
+		"	in vec2 fpos;\n"
+		"	out vec4 outColor;\n"
+		"#else\n" // !NANOVG_GL3
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"	uniform sampler2D tex;\n"
+		"	varying vec2 ftcoord;\n"
+		"	varying vec2 fpos;\n"
+		"#endif\n"
+		"#ifndef USE_UNIFORMBUFFER\n"
+		"	#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)\n"
+		"	#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)\n"
+		"	#define innerCol frag[6]\n"
+		"	#define outerCol frag[7]\n"
+		"	#define scissorExt frag[8].xy\n"
+		"	#define scissorScale frag[8].zw\n"
+		"	#define extent frag[9].xy\n"
+		"	#define radius frag[9].z\n"
+		"	#define feather frag[9].w\n"
+		"	#define strokeMult frag[10].x\n"
+		"	#define strokeThr frag[10].y\n"
+		"	#define texType int(frag[10].z)\n"
+		"	#define type int(frag[10].w)\n"
+		"#endif\n"
+		"\n"
+		"// Scissoring\n"
+		"float scissorMask(vec2 p) {\n"
+		"	vec2 sc = (abs((scissorMat * vec3(p,1.0)).xy) - scissorExt);\n"
+		"	sc = vec2(0.5,0.5) - sc * scissorScale;\n"
+		"	return clamp(sc.x,0.0,1.0) * clamp(sc.y,0.0,1.0);\n"
+		"}\n"
+		"#ifdef EDGE_AA\n"
+		"// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.\n"
+		"float strokeMask() {\n"
+		"	return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);\n"
+		"}\n"
+		"#endif\n"
+		"\n"
+		"void main(void) {\n"
+		"   vec4 result;\n"
+		"	float scissor = scissorMask(fpos);\n"
+		"#ifdef EDGE_AA\n"
+		"	float strokeAlpha = strokeMask();\n"
+		"	if (strokeAlpha < strokeThr) discard;\n"
+		"#else\n"
+		"	float strokeAlpha = 1.0;\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"		vec4 color = texture(tex, ftcoord);\n"
+		"#else\n"
+		"		vec4 color = texture2D(tex, ftcoord);\n"
+		"#endif\n"
+		"		if (texType == 1) color = vec4(color.xyz*color.w,color.w);"
+		"		if (texType == 2) color = vec4(color.x);"
+		"		color *= scissor;\n"
+		"		result = color * innerCol;\n"
+		"#ifdef NANOVG_GL3\n"
+		"	outColor = result;\n"
+		"#else\n"
+		"	gl_FragColor = result;\n"
+		"#endif\n"
+		"}\n";		
+
+	static const char* fillFragShader4 =
+		"#ifdef GL_ES\n"
+		"#if defined(GL_FRAGMENT_PRECISION_HIGH) || defined(NANOVG_GL3)\n"
+		" precision highp float;\n"
+		"#else\n"
+		" precision mediump float;\n"
+		"#endif\n"
+		"#endif\n"
+		"#ifdef NANOVG_GL3\n"
+		"#ifdef USE_UNIFORMBUFFER\n"
+		"	layout(std140) uniform frag {\n"
+		"		mat3 scissorMat;\n"
+		"		mat3 paintMat;\n"
+		"		vec4 innerCol;\n"
+		"		vec4 outerCol;\n"
+		"		vec2 scissorExt;\n"
+		"		vec2 scissorScale;\n"
+		"		vec2 extent;\n"
+		"		float radius;\n"
+		"		float feather;\n"
+		"		float strokeMult;\n"
+		"		float strokeThr;\n"
+		"		int texType;\n"
+		"		int type;\n"
+		"	};\n"
+		"#else\n" // NANOVG_GL3 && !USE_UNIFORMBUFFER
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"#endif\n"
+		"	uniform sampler2D tex;\n"
+		"	in vec2 ftcoord;\n"
+		"	in vec2 fpos;\n"
+		"	out vec4 outColor;\n"
+		"#else\n" // !NANOVG_GL3
+		"	uniform vec4 frag[UNIFORMARRAY_SIZE];\n"
+		"	uniform sampler2D tex;\n"
+		"	varying vec2 ftcoord;\n"
+		"	varying vec2 fpos;\n"
+		"#endif\n"
+		"#ifndef USE_UNIFORMBUFFER\n"
+		"	#define scissorMat mat3(frag[0].xyz, frag[1].xyz, frag[2].xyz)\n"
+		"	#define paintMat mat3(frag[3].xyz, frag[4].xyz, frag[5].xyz)\n"
+		"	#define innerCol frag[6]\n"
+		"	#define outerCol frag[7]\n"
+		"	#define scissorExt frag[8].xy\n"
+		"	#define scissorScale frag[8].zw\n"
+		"	#define extent frag[9].xy\n"
+		"	#define radius frag[9].z\n"
+		"	#define feather frag[9].w\n"
+		"	#define strokeMult frag[10].x\n"
+		"	#define strokeThr frag[10].y\n"
+		"	#define texType int(frag[10].z)\n"
+		"	#define type int(frag[10].w)\n"
+		"#endif\n"
+		"\n"
+		"float sdroundrect(vec2 pt, vec2 ext, float rad) {\n"
+		"	vec2 ext2 = ext - vec2(rad,rad);\n"
+		"	vec2 d = abs(pt) - ext2;\n"
+		"	return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - rad;\n"
+		"}\n"
+		"\n"
+		"// Scissoring\n"
+		"float scissorMask(vec2 p) {\n"
+		"	vec2 sc = (abs((scissorMat * vec3(p,1.0)).xy) - scissorExt);\n"
+		"	sc = vec2(0.5,0.5) - sc * scissorScale;\n"
+		"	return clamp(sc.x,0.0,1.0) * clamp(sc.y,0.0,1.0);\n"
+		"}\n"
+		"#ifdef EDGE_AA\n"
+		"// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.\n"
+		"float strokeMask() {\n"
+		"	return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);\n"
+		"}\n"
+		"#endif\n"
+		"\n"
+		"void main(void) {\n"
+		"   vec4 result;\n"
+		"	float scissor = scissorMask(fpos);\n"
+		"#ifdef EDGE_AA\n"
+		"	float strokeAlpha = strokeMask();\n"
+		"	if (strokeAlpha < strokeThr) discard;\n"
+		"#else\n"
+		"	float strokeAlpha = 1.0;\n"
+		"#endif\n"
+		"		// Calculate gradient color using box gradient\n"
+		"		vec4 color = innerCol;\n"
+		"		// Combine alpha\n"
+		"		color *= strokeAlpha * scissor;\n"
+		"		result = color;\n"
+		"#ifdef NANOVG_GL3\n"
+		"	outColor = result;\n"
+		"#else\n"
+		"	gl_FragColor = result;\n"
+		"#endif\n"
+		"}\n";		
+
 	glnvg__checkError(gl, "init");
 
 	if (gl->flags & NVG_ANTIALIAS) {
-		if (glnvg__createShader(&gl->shader, "shader", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader) == 0)
+		if (glnvg__createShader(&gl->shader[0], "shader0", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader0) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[1], "shader1", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader1) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[2], "shader2", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader2) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[3], "shader3", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader3) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[4], "shader4", shaderHeader, "#define EDGE_AA 1\n", fillVertShader, fillFragShader4) == 0)
 			return 0;
 	} else {
-		if (glnvg__createShader(&gl->shader, "shader", shaderHeader, NULL, fillVertShader, fillFragShader) == 0)
+		if (glnvg__createShader(&gl->shader[0], "shader0", shaderHeader, NULL, fillVertShader, fillFragShader0) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[1], "shader1", shaderHeader, NULL, fillVertShader, fillFragShader1) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[2], "shader2", shaderHeader, NULL, fillVertShader, fillFragShader2) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[3], "shader3", shaderHeader, NULL, fillVertShader, fillFragShader3) == 0)
+			return 0;
+		if (glnvg__createShader(&gl->shader[4], "shader4", shaderHeader, NULL, fillVertShader, fillFragShader4) == 0)
 			return 0;
 	}
 
 	glnvg__checkError(gl, "uniform locations");
-	glnvg__getUniforms(&gl->shader);
+	glnvg__getUniforms(&gl->shader[0]);
+	glnvg__getUniforms(&gl->shader[1]);
+	glnvg__getUniforms(&gl->shader[2]);
+	glnvg__getUniforms(&gl->shader[3]);
+	glnvg__getUniforms(&gl->shader[4]);
 
 	// Create dynamic vertex array
 #if defined NANOVG_GL3
@@ -757,9 +1230,9 @@ static int glnvg__renderCreateTexture(void* uptr, int type, int w, int h, int im
 #if defined(NANOVG_GLES2)
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, w, h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, data);
 #elif defined(NANOVG_GLES3)
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, data);
 #else
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, w, h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, data);
 #endif
 
 	if (imageFlags & NVG_IMAGE_GENERATE_MIPMAPS) {
@@ -849,7 +1322,7 @@ static int glnvg__renderUpdateTexture(void* uptr, int image, int x, int y, int w
 #ifdef NANOVG_GLES2
 		glTexSubImage2D(GL_TEXTURE_2D, 0, x,y, w,h, GL_LUMINANCE, GL_UNSIGNED_BYTE, data);
 #else
-		glTexSubImage2D(GL_TEXTURE_2D, 0, x,y, w,h, GL_RED, GL_UNSIGNED_BYTE, data);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x,y, w,h, GL_LUMINANCE, GL_UNSIGNED_BYTE, data);
 #endif
 
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -958,9 +1431,18 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 		#endif
 //		printf("frag->texType = %d\n", frag->texType);
 	} else {
-		frag->type = NSVG_SHADER_FILLGRAD;
-		frag->radius = paint->radius;
-		frag->feather = paint->feather;
+		if (paint->feather > 1)
+		{
+			frag->type = NSVG_SHADER_FILLGRAD;
+			frag->radius = paint->radius;
+			frag->feather = paint->feather;
+		}
+		else
+		{
+			frag->type = NSVG_SHADER_FILLSIMPLE;
+			frag->radius = paint->radius;
+			frag->feather = paint->feather;			
+		}
 		nvgTransformInverse(invxform, paint->xform);
 	}
 
@@ -971,13 +1453,26 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 
 static GLNVGfragUniforms* nvg__fragUniformPtr(GLNVGcontext* gl, int i);
 
+static int lastShader = -1;
 static void glnvg__setUniforms(GLNVGcontext* gl, int uniformOffset, int image)
 {
 #if NANOVG_GL_USE_UNIFORMBUFFER
 	glBindBufferRange(GL_UNIFORM_BUFFER, GLNVG_FRAG_BINDING, gl->fragBuf, uniformOffset, sizeof(GLNVGfragUniforms));
 #else
 	GLNVGfragUniforms* frag = nvg__fragUniformPtr(gl, uniformOffset);
-	glUniform4fv(gl->shader.loc[GLNVG_LOC_FRAG], NANOVG_GL_UNIFORMARRAY_SIZE, &(frag->uniformArray[0][0]));
+	if (lastShader != (int)frag->type)
+	{
+		// printf("change %d -> %d\n", lastShader, (int)frag->type);
+		lastShader = (int)frag->type;
+		glUseProgram(gl->shader[lastShader].prog);
+		glUniform1i(gl->shader[lastShader].loc[GLNVG_LOC_TEX], 0);
+		glUniform2fv(gl->shader[lastShader].loc[GLNVG_LOC_VIEWSIZE], 1, gl->view);
+	}
+	// glUseProgram(gl->shader[(int)frag->type].prog);
+	// glUniform1i(gl->shader[(int)frag->type].loc[GLNVG_LOC_TEX], 0);
+	// glUniform2fv(gl->shader[(int)frag->type].loc[GLNVG_LOC_VIEWSIZE], 1, gl->view);
+
+	glUniform4fv(gl->shader[(int)frag->type].loc[GLNVG_LOC_FRAG], NANOVG_GL_UNIFORMARRAY_SIZE, &(frag->uniformArray[0][0]));
 #endif
 
 	if (image != 0) {
@@ -1173,7 +1668,7 @@ static void glnvg__renderFlush(void* uptr)
 	if (gl->ncalls > 0) {
 
 		// Setup require GL state.
-		glUseProgram(gl->shader.prog);
+		//glUseProgram(gl->shader.prog);
 
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_BACK);
@@ -1217,25 +1712,45 @@ static void glnvg__renderFlush(void* uptr)
 		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(NVGvertex), (const GLvoid*)(0 + 2*sizeof(float)));
 
 		// Set view and texture just once per frame.
-		glUniform1i(gl->shader.loc[GLNVG_LOC_TEX], 0);
-		glUniform2fv(gl->shader.loc[GLNVG_LOC_VIEWSIZE], 1, gl->view);
+	// 	for (i = 0; i < 4; i++)
+	// 	{
+	// 	glUniform1i(gl->shader[i].loc[GLNVG_LOC_TEX], 0);
+	// 	glUniform2fv(gl->shader[i].loc[GLNVG_LOC_VIEWSIZE], 1, gl->view);
+	// }
 
 #if NANOVG_GL_USE_UNIFORMBUFFER
 		glBindBuffer(GL_UNIFORM_BUFFER, gl->fragBuf);
 #endif
 
+		lastShader = -1;
+
+		int counts[4] = {0};
 		for (i = 0; i < gl->ncalls; i++) {
 			GLNVGcall* call = &gl->calls[i];
 			glnvg__blendFuncSeparate(gl,&call->blendFunc);
 			if (call->type == GLNVG_FILL)
+			{
 				glnvg__fill(gl, call);
+				counts[0]++;
+			}
 			else if (call->type == GLNVG_CONVEXFILL)
+			{
 				glnvg__convexFill(gl, call);
+				counts[1]++;
+			}
 			else if (call->type == GLNVG_STROKE)
+			{
 				glnvg__stroke(gl, call);
+				counts[2]++;
+			}
 			else if (call->type == GLNVG_TRIANGLES)
+			{
 				glnvg__triangles(gl, call);
+				counts[3]++;
+			}
 		}
+
+		// printf("%d %d %d %d\n", counts[0], counts[1], counts[2], counts[3]);
 
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(1);
@@ -1505,7 +2020,7 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGcompositeOper
 	if (call->uniformOffset == -1) goto error;
 	frag = nvg__fragUniformPtr(gl, call->uniformOffset);
 	glnvg__convertPaint(gl, frag, paint, scissor, 1.0f, 1.0f, -1.0f);
-	frag->type = NSVG_SHADER_IMG;
+	frag->type = call->image ? NSVG_SHADER_IMG : NSVG_SHADER_FILLSIMPLE;
 
 	return;
 
@@ -1521,7 +2036,8 @@ static void glnvg__renderDelete(void* uptr)
 	int i;
 	if (gl == NULL) return;
 
-	glnvg__deleteShader(&gl->shader);
+	for (int i = 0; i < sizeof(gl->shader)/sizeof(gl->shader[0]); i++)
+		glnvg__deleteShader(&gl->shader[i]);
 
 #if NANOVG_GL3
 #if NANOVG_GL_USE_UNIFORMBUFFER

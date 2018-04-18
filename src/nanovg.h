@@ -461,6 +461,8 @@ void nvgResetScissor(NVGcontext* ctx);
 // Clears the current path and sub-paths.
 void nvgBeginPath(NVGcontext* ctx);
 
+void nvgAllowMergeSubpaths(NVGcontext* ctx);
+
 // Starts new sub-path with specified point as first point.
 void nvgMoveTo(NVGcontext* ctx, float x, float y);
 
