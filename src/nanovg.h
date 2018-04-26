@@ -463,6 +463,8 @@ void nvgBeginPath(NVGcontext* ctx);
 
 void nvgAllowMergeSubpaths(NVGcontext* ctx);
 
+void nvgSubpathTexPos(NVGcontext* ctx, float u, float v);
+
 // Starts new sub-path with specified point as first point.
 void nvgMoveTo(NVGcontext* ctx, float x, float y);
 
@@ -644,6 +646,7 @@ struct NVGpath {
 	int nstroke;
 	int winding;
 	int convex;
+	float subpathTexU, subpathTexV;		
 };
 typedef struct NVGpath NVGpath;
 

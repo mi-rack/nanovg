@@ -55,6 +55,7 @@ enum NVGcommands {
 	NVG_BEZIERTO = 2,
 	NVG_CLOSE = 3,
 	NVG_WINDING = 4,
+	NVG_TEXPOS = 5,
 };
 
 enum NVGpointFlags
@@ -1114,6 +1115,9 @@ static void nvg__appendCommands(NVGcontext* ctx, float* vals, int nvals)
 		case NVG_WINDING:
 			i += 2;
 			break;
+		case NVG_TEXPOS:
+			i += 3;
+			break;
 		default:
 			i++;
 		}
@@ -1153,6 +1157,8 @@ static void nvg__addPath(NVGcontext* ctx)
 	memset(path, 0, sizeof(*path));
 	path->first = ctx->cache->npoints;
 	path->winding = NVG_CCW;
+	path->subpathTexU = 0.5f;
+	path->subpathTexV = 1.f;
 
 	ctx->cache->npaths++;
 }
@@ -1371,6 +1377,15 @@ static void nvg__flattenPaths(NVGcontext* ctx)
 			nvg__pathWinding(ctx, (int)ctx->commands[i+1]);
 			i += 2;
 			break;
+		case NVG_TEXPOS:
+		{
+			NVGpath* path = nvg__lastPath(ctx);
+			path->subpathTexU = ctx->commands[i+1];
+			path->subpathTexV = ctx->commands[i+2];
+			i += 3;
+			break;
+		}
+
 		default:
 			i++;
 		}
@@ -1866,7 +1881,8 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 	if (verts == NULL) return 0;
 
 	convex = cache->npaths == 1 && cache->paths[0].convex;
-dst=verts;
+	dst = verts;
+
 	for (i = 0; i < cache->npaths; i++) {
 		NVGpath* path = &cache->paths[i];
 		NVGpoint* pts = &cache->points[path->first];
@@ -1877,7 +1893,6 @@ dst=verts;
 
 		// Calculate shape vertices.
 		woff = 0.5f*aa;
-		// dst = verts;
 		path->fill = dst;
 
 		if (0&&fringe) {
@@ -1909,9 +1924,9 @@ dst=verts;
 			}
 		} else {
 			for (j = 2; j < path->count; ++j) {
-				nvg__vset(dst+0, pts[0].x, pts[0].y, 0.5f,1);
-				nvg__vset(dst+1, pts[j-1].x, pts[j-1].y, 0.5f,1);
-				nvg__vset(dst+2, pts[j].x, pts[j].y, 0.5f,1);
+				nvg__vset(dst+0, pts[0].x, pts[0].y, path->subpathTexU, path->subpathTexV);
+				nvg__vset(dst+1, pts[j-1].x, pts[j-1].y, path->subpathTexU, path->subpathTexV);
+				nvg__vset(dst+2, pts[j].x, pts[j].y, path->subpathTexU, path->subpathTexV);
 				dst+=3;
 			}
 		}
@@ -1971,9 +1986,7 @@ dst=verts;
 static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLimit)
 {
 	if (ctx->allowMergeSubpaths)
-	{
 		return nvg__expandFillMerge(ctx, w, lineJoin, miterLimit);
-	}
 
 	NVGpathCache* cache = ctx->cache;
 	NVGvertex* verts;
@@ -2104,6 +2117,12 @@ void nvgBeginPath(NVGcontext* ctx)
 void nvgAllowMergeSubpaths(NVGcontext* ctx)
 {
 	ctx->allowMergeSubpaths = 1;
+}
+
+void nvgSubpathTexPos(NVGcontext* ctx, float u, float v)
+{
+	float vals[] = { NVG_TEXPOS, u, v };
+	nvg__appendCommands(ctx, vals, NVG_COUNTOF(vals));
 }
 
 void nvgMoveTo(NVGcontext* ctx, float x, float y)
