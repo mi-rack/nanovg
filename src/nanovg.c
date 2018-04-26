@@ -1895,10 +1895,12 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 		woff = 0.5f*aa;
 		path->fill = dst;
 
-		if (0&&fringe) {
+
+		if (fringe) {
 			// Looping
 			p0 = &pts[path->count-1];
 			p1 = &pts[0];
+			NVGvertex *d0 = dst;
 			for (j = 0; j < path->count; ++j) {
 				if (p1->flags & NVG_PT_BEVEL) {
 					float dlx0 = p0->dy;
@@ -1908,17 +1910,31 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 					if (p1->flags & NVG_PT_LEFT) {
 						float lx = p1->x + p1->dmx * woff;
 						float ly = p1->y + p1->dmy * woff;
-						nvg__vset(dst, lx, ly, 0.5f,1); dst++;
+						nvg__vset(dst, lx, ly, 0.5f,1);
+						dst++;
 					} else {
 						float lx0 = p1->x + dlx0 * woff;
 						float ly0 = p1->y + dly0 * woff;
 						float lx1 = p1->x + dlx1 * woff;
 						float ly1 = p1->y + dly1 * woff;
-						nvg__vset(dst, lx0, ly0, 0.5f,1); dst++;
-						nvg__vset(dst, lx1, ly1, 0.5f,1); dst++;
+						nvg__vset(dst, lx0, ly0, 0.5f,1);
+						dst++;
+						nvg__vset(dst, lx1, ly1, 0.5f,1);
+						dst++;
 					}
 				} else {
-					nvg__vset(dst, p1->x + (p1->dmx * woff), p1->y + (p1->dmy * woff), 0.5f,1); dst++;
+					if (j < 3)
+					{
+						nvg__vset(dst, p1->x + (p1->dmx * woff), p1->y + (p1->dmy * woff), path->subpathTexU, path->subpathTexV);
+						dst++;
+					}
+					else
+					{
+						nvg__vset(dst+0, d0->x, d0->y, path->subpathTexU, path->subpathTexV);
+						nvg__vset(dst+1, dst[-1].x, dst[-1].y, path->subpathTexU, path->subpathTexV);
+						nvg__vset(dst+2, p1->x + (p1->dmx * woff), p1->y + (p1->dmy * woff), path->subpathTexU, path->subpathTexV);
+						dst+=3;						
+					}
 				}
 				p0 = p1++;
 			}
