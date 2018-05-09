@@ -1187,7 +1187,7 @@ static int glnvg__renderCreateTexture(void* uptr, int type, int w, int h, int im
 
 	if (tex == NULL) return 0;
 
-#ifdef NANOVG_GLES2
+/*#ifdef NANOVG_GLES2
 	// Check for non-power of 2.
 	if (glnvg__nearestPow2(w) != (unsigned int)w || glnvg__nearestPow2(h) != (unsigned int)h) {
 		// No repeat
@@ -1201,7 +1201,7 @@ static int glnvg__renderCreateTexture(void* uptr, int type, int w, int h, int im
 			imageFlags &= ~NVG_IMAGE_GENERATE_MIPMAPS;
 		}
 	}
-#endif
+#endif*/
 
 	glGenTextures(1, &tex->tex);
 	tex->width = w;
