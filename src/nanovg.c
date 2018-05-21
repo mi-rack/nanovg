@@ -1772,9 +1772,13 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, float fringe, int lineCap
 		}
 	}
 
+	// Degenerative triangles between subpaths
+	cverts += (cache->npaths - 1) * 2;
+
 	verts = nvg__allocTempVerts(ctx, cverts);
 	if (verts == NULL) return 0;
 
+	dst = verts;
 	for (i = 0; i < cache->npaths; i++) {
 		NVGpath* path = &cache->paths[i];
 		NVGpoint* pts = &cache->points[path->first];
@@ -1788,8 +1792,11 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, float fringe, int lineCap
 
 		// Calculate fringe or stroke
 		loop = (path->closed == 0) ? 0 : 1;
-		dst = verts;
 		path->stroke = dst;
+
+		NVGvertex *deg = dst;
+		if (i > 0)
+			dst += 2;
 
 		if (loop) {
 			// Looping
@@ -1826,9 +1833,9 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, float fringe, int lineCap
 					dst = nvg__bevelJoin(dst, p0, p1, w, w, u0, u1, aa);
 				}
 			} else {
-				nvg__vset(dst, p1->x + (p1->dmx * w), p1->y + (p1->dmy * w), u0,1); dst++;
-				nvg__vset(dst, p1->x - (p1->dmx * w), p1->y - (p1->dmy * w), u1,1); dst++;
-			}
+					nvg__vset(dst, p1->x + (p1->dmx * w), p1->y + (p1->dmy * w), u0,1); dst++;
+					nvg__vset(dst, p1->x - (p1->dmx * w), p1->y - (p1->dmy * w), u1,1); dst++;
+				}
 			p0 = p1++;
 		}
 
@@ -1849,10 +1856,14 @@ static int nvg__expandStroke(NVGcontext* ctx, float w, float fringe, int lineCap
 				dst = nvg__roundCapEnd(dst, p1, dx, dy, w, ncap, aa, u0, u1);
 		}
 
-		path->nstroke = (int)(dst - verts);
-
-		verts = dst;
+		if (i > 0) {
+			deg[0] = deg[-1];
+			deg[1] = deg[2];
+		}
 	}
+
+	cache->npaths = 1;
+	cache->paths[0].nstroke = (int)(dst - verts);	
 
 	return 1;
 }
