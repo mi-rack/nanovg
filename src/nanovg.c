@@ -1905,7 +1905,7 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 		// Calculate shape vertices.
 		woff = 0.5f*aa;
 		path->fill = dst;
-
+		path->nfill = 0;
 
 		if (fringe) {
 			// Looping
@@ -1914,7 +1914,7 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 			NVGvertex *d0 = dst;
 			for (j = 0; j < path->count; ++j) {
 				if (p1->flags & NVG_PT_BEVEL) {
-					float dlx0 = p0->dy;
+					/*float dlx0 = p0->dy;
 					float dly0 = -p0->dx;
 					float dlx1 = p1->dy;
 					float dly1 = -p1->dx;
@@ -1932,7 +1932,7 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 						dst++;
 						nvg__vset(dst, lx1, ly1, 0.5f,1);
 						dst++;
-					}
+					}*/
 				} else {
 					if (j < 3)
 					{
@@ -1958,11 +1958,29 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 			}
 		}
 
-		path->nfill = (int)(dst - verts);
-		//verts = dst;
+		cache->paths[0].nfill += (int)(dst - verts);
+		verts = dst;
+	}
 
-		// Calculate fringe
-		if (0&&fringe) {
+	// Calculate fringe
+	if (fringe)
+	for (i = 0; i < cache->npaths; i++) {
+		NVGpath* path = &cache->paths[i];
+		NVGpoint* pts = &cache->points[path->first];
+		NVGpoint* p0;
+		NVGpoint* p1;
+		float rw, lw, woff;
+		float ru, lu;
+
+		// Calculate shape vertices.
+		woff = 0.5f*aa;
+		path->nstroke = 0;
+
+		NVGvertex *deg = dst;
+		if (i > 0)
+			dst += 2;
+
+		// if (fringe) {
 			lw = w + woff;
 			rw = w - woff;
 			lu = 0;
@@ -1983,7 +2001,7 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 
 			for (j = 0; j < path->count; ++j) {
 				if ((p1->flags & (NVG_PT_BEVEL | NVG_PR_INNERBEVEL)) != 0) {
-					dst = nvg__bevelJoin(dst, p0, p1, lw, rw, lu, ru, ctx->fringeWidth);
+					//dst = nvg__bevelJoin(dst, p0, p1, lw, rw, lu, ru, ctx->fringeWidth);
 				} else {
 					nvg__vset(dst, p1->x + (p1->dmx * lw), p1->y + (p1->dmy * lw), lu,1); dst++;
 					nvg__vset(dst, p1->x - (p1->dmx * rw), p1->y - (p1->dmy * rw), ru,1); dst++;
@@ -1995,16 +2013,21 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 			nvg__vset(dst, verts[0].x, verts[0].y, lu,1); dst++;
 			nvg__vset(dst, verts[1].x, verts[1].y, ru,1); dst++;
 
-			path->nstroke = (int)(dst - verts);
-			verts = dst;
-		} else {
-			path->stroke = NULL;
-			path->nstroke = 0;
+		if (i > 0) {
+			deg[0] = deg[-1];
+			deg[1] = deg[2];
 		}
+
+			cache->paths[0].nstroke += (int)(dst - verts);
+			verts = dst;
+		// } else {
+		// 	// path->stroke = NULL;
+		// 	// path->nstroke = 0;
+		// }
 	}
 
 	cache->npaths = 1;
-	cache->paths[0].nfill = (int)(dst - verts);
+	// cache->paths[0].nfill = (int)(dst - verts);
 	//cache->paths[0].convex = 1;
 
 	return 1;
@@ -2416,8 +2439,12 @@ void nvgFill(NVGcontext* ctx)
 	fillPaint.innerColor.a *= state->alpha;
 	fillPaint.outerColor.a *= state->alpha;
 
-	if (ctx->allowMergeSubpaths)
+	if (ctx->allowMergeSubpaths) {
 		ctx->params.renderTriangles(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->cache->paths[0].fill, ctx->cache->paths[0].nfill);
+		if (ctx->params.edgeAntiAlias && state->shapeAntiAlias)
+			ctx->params.renderStroke(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
+									 ctx->fringeWidth, ctx->cache->paths, ctx->cache->npaths);
+	}
 	else
 		ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
 							   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
