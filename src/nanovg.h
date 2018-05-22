@@ -512,6 +512,7 @@ void nvgFill(NVGcontext* ctx);
 // Fills the current path with current stroke style.
 void nvgStroke(NVGcontext* ctx);
 
+void nvgTextureQuads(NVGcontext* ctx, int image);
 
 //
 // Text
@@ -661,7 +662,7 @@ struct NVGparams {
 	void (*renderViewport)(void* uptr, int width, int height, float devicePixelRatio);
 	void (*renderCancel)(void* uptr);
 	void (*renderFlush)(void* uptr);
-	void (*renderFill)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths);
+	void (*renderFill)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, const float* bounds, const NVGpath* paths, int npaths, int merged);
 	void (*renderStroke)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe, float strokeWidth, const NVGpath* paths, int npaths);
 	void (*renderTriangles)(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, const NVGvertex* verts, int nverts);
 	void (*renderDelete)(void* uptr);

@@ -166,6 +166,7 @@ enum GLNVGcallType {
 	GLNVG_CONVEXFILL,
 	GLNVG_STROKE,
 	GLNVG_TRIANGLES,
+	GLNVG_MERGEDFILL,
 };
 
 struct GLNVGcall {
@@ -1429,7 +1430,7 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGfragUniforms* frag, NVGpai
 		else
 			frag->texType = 2.0f;
 		#endif
-//		printf("frag->texType = %d\n", frag->texType);
+
 	} else {
 		if (paint->feather > 1)
 		{
@@ -1525,7 +1526,8 @@ static void glnvg__fill(GLNVGcontext* gl, GLNVGcall* call)
 		glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 		// Draw fringes
 		for (i = 0; i < npaths; i++)
-			glDrawArrays(GL_TRIANGLE_STRIP, paths[i].strokeOffset, paths[i].strokeCount);
+			if (paths[i].strokeCount)
+				glDrawArrays(GL_TRIANGLE_STRIP, paths[i].strokeOffset, paths[i].strokeCount);
 	}
 
 	// Draw fill
@@ -1549,7 +1551,22 @@ static void glnvg__convexFill(GLNVGcontext* gl, GLNVGcall* call)
 	if (gl->flags & NVG_ANTIALIAS) {
 		// Draw fringes
 		for (i = 0; i < npaths; i++)
-			glDrawArrays(GL_TRIANGLE_STRIP, paths[i].strokeOffset, paths[i].strokeCount);
+			if (paths[i].strokeCount)
+				glDrawArrays(GL_TRIANGLE_STRIP, paths[i].strokeOffset, paths[i].strokeCount);
+	}
+}
+
+static void glnvg__mergedFill(GLNVGcontext* gl, GLNVGcall* call)
+{
+	GLNVGpath* paths = &gl->paths[call->pathOffset];
+
+	glnvg__setUniforms(gl, call->uniformOffset, call->image);
+	glnvg__checkError(gl, "merged fill");
+
+	glDrawArrays(GL_TRIANGLES, paths[0].fillOffset, paths[0].fillCount);
+	if (paths[0].strokeCount) {
+		// Draw fringes
+		glDrawArrays(GL_TRIANGLE_STRIP, paths[0].strokeOffset, paths[0].strokeCount);
 	}
 }
 
@@ -1724,7 +1741,7 @@ static void glnvg__renderFlush(void* uptr)
 
 		lastShader = -1;
 
-		int counts[5] = {0};
+		int counts[6] = {0};
 		for (i = 0; i < gl->ncalls; i++) {
 			GLNVGcall* call = &gl->calls[i];
 			counts[4] += call->pathCount;
@@ -1749,9 +1766,14 @@ static void glnvg__renderFlush(void* uptr)
 				glnvg__triangles(gl, call);
 				counts[3]++;
 			}
+			else if (call->type == GLNVG_MERGEDFILL)
+			{
+				glnvg__mergedFill(gl, call);
+				counts[4]++;
+			}
 		}
 
-		// printf("%d %d %d %d  %d\n", counts[0], counts[1], counts[2], counts[3], counts[4]);
+		// printf("%d %d %d %d  %d\n", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]);
 
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(1);
@@ -1859,7 +1881,7 @@ static void glnvg__vset(NVGvertex* vtx, float x, float y, float u, float v)
 }
 
 static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation, NVGscissor* scissor, float fringe,
-							  const float* bounds, const NVGpath* paths, int npaths)
+							  const float* bounds, const NVGpath* paths, int npaths, int merged)
 {
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	GLNVGcall* call = glnvg__allocCall(gl);
@@ -1877,7 +1899,12 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperation
 	call->image = paint->image;
 	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
 
-	if (npaths == 1 && paths[0].convex)
+	if (merged)
+	{
+		call->type = GLNVG_MERGEDFILL;
+		call->triangleCount = 0;	// Bounding box fill quad not needed for convex fill
+	}
+	else if (npaths == 1 && paths[0].convex)
 	{
 		call->type = GLNVG_CONVEXFILL;
 		call->triangleCount = 0;	// Bounding box fill quad not needed for convex fill
@@ -1925,6 +1952,12 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperation
 		frag->type = NSVG_SHADER_SIMPLE;
 		// Fill shader
 		glnvg__convertPaint(gl, nvg__fragUniformPtr(gl, call->uniformOffset + gl->fragSize), paint, scissor, fringe, fringe, -1.0f);
+	} else if (call->type == GLNVG_MERGEDFILL) {
+		call->uniformOffset = glnvg__allocFragUniforms(gl, 1);
+		if (call->uniformOffset == -1) goto error;
+		frag = nvg__fragUniformPtr(gl, call->uniformOffset);
+		glnvg__convertPaint(gl, frag, paint, scissor, 1.0f, 1.0f, -1.0f);
+		frag->type = call->image ? NSVG_SHADER_IMG : NSVG_SHADER_FILLSIMPLE;
 	} else {
 		call->uniformOffset = glnvg__allocFragUniforms(gl, 1);
 		if (call->uniformOffset == -1) goto error;

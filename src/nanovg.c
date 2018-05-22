@@ -367,10 +367,6 @@ void nvgDeleteInternal(NVGcontext* ctx)
 
 void nvgBeginFrame(NVGcontext* ctx, int windowWidth, int windowHeight, float devicePixelRatio)
 {
-/*	printf("Tris: draws:%d  fill:%d  stroke:%d  text:%d  TOT:%d\n",
-		ctx->drawCallCount, ctx->fillTriCount, ctx->strokeTriCount, ctx->textTriCount,
-		ctx->fillTriCount+ctx->strokeTriCount+ctx->textTriCount);*/
-
 	ctx->nstates = 0;
 	nvgSave(ctx);
 	nvgReset(ctx);
@@ -392,6 +388,10 @@ void nvgCancelFrame(NVGcontext* ctx)
 
 void nvgEndFrame(NVGcontext* ctx)
 {
+	// printf("Calls:%d   Tris: fill:%d  stroke:%d  text:%d  TOT:%d\n",
+	// 	ctx->drawCallCount, ctx->fillTriCount, ctx->strokeTriCount, ctx->textTriCount,
+	// 	ctx->fillTriCount+ctx->strokeTriCount+ctx->textTriCount);
+
 	ctx->params.renderFlush(ctx->params.userPtr);
 	if (ctx->fontImageIdx != 0) {
 		int fontImage = ctx->fontImages[ctx->fontImageIdx];
@@ -1888,10 +1888,15 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 			cverts += (path->count + path->nbevel*5 + 1) * 2; // plus one for loop
 	}
 
+	// Degenerative triangles between subpaths
+	if (fringe)
+		cverts += (cache->npaths - 1) * 2;	
+
 	verts = nvg__allocTempVerts(ctx, cverts);
 	if (verts == NULL) return 0;
 
-	convex = cache->npaths == 1 && cache->paths[0].convex;
+	//XXX: assume merging is for convex polygons for now
+	convex = 1; //cache->npaths == 1 && cache->paths[0].convex;
 	dst = verts;
 
 	for (i = 0; i < cache->npaths; i++) {
@@ -2152,6 +2157,53 @@ static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLi
 			path->nstroke = 0;
 		}
 	}
+
+	return 1;
+}
+
+static int nvg__expandQuads(NVGcontext* ctx)
+{
+	NVGpathCache* cache = ctx->cache;
+	NVGvertex* verts;
+	NVGvertex* dst;
+	int cverts, i, j;
+	float aa = ctx->fringeWidth;
+
+
+	// Calculate max vertex usage.
+	cverts = 0;
+	for (i = 0; i < cache->npaths; i++) {
+		cverts += 6;
+	}
+
+
+	verts = nvg__allocTempVerts(ctx, cverts);
+	if (verts == NULL) return 0;
+
+	dst = verts;
+
+	for (i = 0; i < cache->npaths; i++) {
+		NVGpath* path = &cache->paths[i];
+		NVGpoint* pts = &cache->points[path->first];
+
+		path->fill = dst;
+		path->nfill = 0;
+
+		nvg__vset(dst+0, pts[0].x, pts[0].y, 0, 1);
+		nvg__vset(dst+1, pts[1].x, pts[1].y, 0, 0);
+		nvg__vset(dst+2, pts[2].x, pts[2].y, 1, 0);
+
+		nvg__vset(dst+4, pts[2].x, pts[2].y, 1, 0);
+		nvg__vset(dst+5, pts[3].x, pts[3].y, 1, 1);
+		nvg__vset(dst+3, pts[0].x, pts[0].y, 0, 1);
+
+		dst+=6;
+
+		cache->paths[0].nfill += (int)(dst - verts);
+		verts = dst;
+	}
+
+	cache->npaths = 1;
 
 	return 1;
 }
@@ -2429,6 +2481,8 @@ void nvgFill(NVGcontext* ctx)
 	NVGpaint fillPaint = state->fill;
 	int i;
 
+	int origNPaths = ctx->cache->npaths;	
+
 	nvg__flattenPaths(ctx);
 	if (ctx->params.edgeAntiAlias && state->shapeAntiAlias)
 		nvg__expandFill(ctx, ctx->fringeWidth, NVG_MITER, 2.4f);
@@ -2439,23 +2493,21 @@ void nvgFill(NVGcontext* ctx)
 	fillPaint.innerColor.a *= state->alpha;
 	fillPaint.outerColor.a *= state->alpha;
 
-	if (ctx->allowMergeSubpaths) {
-		ctx->params.renderTriangles(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->cache->paths[0].fill, ctx->cache->paths[0].nfill);
-		if (ctx->params.edgeAntiAlias && state->shapeAntiAlias)
-			ctx->params.renderStroke(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
-									 ctx->fringeWidth, ctx->cache->paths, ctx->cache->npaths);
-	}
-	else
-		ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
-							   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
+	ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->fringeWidth,
+						   ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths, ctx->allowMergeSubpaths);
 
 	// Count triangles
 	for (i = 0; i < ctx->cache->npaths; i++) {
 		path = &ctx->cache->paths[i];
 		ctx->fillTriCount += path->nfill-2;
-		ctx->fillTriCount += path->nstroke-2;
-		ctx->drawCallCount += 2;
+		ctx->drawCallCount++;
+		if (ctx->params.edgeAntiAlias && state->shapeAntiAlias) {
+			ctx->fillTriCount += path->nstroke-2;
+			ctx->drawCallCount++;
+		}
 	}
+
+	ctx->cache->npaths = origNPaths;	
 }
 
 void nvgStroke(NVGcontext* ctx)
@@ -2467,6 +2519,7 @@ void nvgStroke(NVGcontext* ctx)
 	const NVGpath* path;
 	int i;
 	
+	int origNPaths = ctx->cache->npaths;
 	
 	if (strokeWidth < ctx->fringeWidth) {
 		// If the stroke width is less than pixel size, use alpha to emulate coverage.
@@ -2497,6 +2550,31 @@ void nvgStroke(NVGcontext* ctx)
 		ctx->strokeTriCount += path->nstroke-2;
 		ctx->drawCallCount++;
 	}
+
+	ctx->cache->npaths = origNPaths;
+}
+
+void nvgTextureQuads(NVGcontext* ctx, int image)
+{
+	NVGstate* state = nvg__getState(ctx);
+	const NVGpath* path;
+	NVGpaint fillPaint = state->fill;
+	int i;
+
+	// Count triangles
+	ctx->fillTriCount += ctx->cache->npaths*2;
+	ctx->drawCallCount++;
+
+	nvg__flattenPaths(ctx);
+	nvg__expandQuads(ctx);
+
+	fillPaint.image = image;
+
+	// Apply global alpha
+	fillPaint.innerColor.a *= state->alpha;
+	fillPaint.outerColor.a *= state->alpha;
+
+	ctx->params.renderTriangles(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, ctx->cache->paths[0].fill, ctx->cache->paths[0].nfill);
 }
 
 // Add fonts
