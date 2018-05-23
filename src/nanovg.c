@@ -2161,7 +2161,7 @@ static int nvg__expandFill(NVGcontext* ctx, float w, int lineJoin, float miterLi
 	return 1;
 }
 
-static int nvg__expandQuads(NVGcontext* ctx)
+static int nvg__expandQuads(NVGcontext* ctx, int flipy)
 {
 	NVGpathCache* cache = ctx->cache;
 	NVGvertex* verts;
@@ -2189,13 +2189,23 @@ static int nvg__expandQuads(NVGcontext* ctx)
 		path->fill = dst;
 		path->nfill = 0;
 
-		nvg__vset(dst+0, pts[0].x, pts[0].y, 0, 1);
-		nvg__vset(dst+1, pts[1].x, pts[1].y, 0, 0);
-		nvg__vset(dst+2, pts[2].x, pts[2].y, 1, 0);
+		if (flipy) {
+			nvg__vset(dst+0, pts[0].x, pts[0].y, 0, 1);
+			nvg__vset(dst+1, pts[1].x, pts[1].y, 0, 0);
+			nvg__vset(dst+2, pts[2].x, pts[2].y, 1, 0);
 
-		nvg__vset(dst+4, pts[2].x, pts[2].y, 1, 0);
-		nvg__vset(dst+5, pts[3].x, pts[3].y, 1, 1);
-		nvg__vset(dst+3, pts[0].x, pts[0].y, 0, 1);
+			nvg__vset(dst+4, pts[2].x, pts[2].y, 1, 0);
+			nvg__vset(dst+5, pts[3].x, pts[3].y, 1, 1);
+			nvg__vset(dst+3, pts[0].x, pts[0].y, 0, 1);
+		} else {
+			nvg__vset(dst+0, pts[0].x, pts[0].y, 0, 0);
+			nvg__vset(dst+1, pts[1].x, pts[1].y, 0, 1);
+			nvg__vset(dst+2, pts[2].x, pts[2].y, 1, 1);
+
+			nvg__vset(dst+4, pts[2].x, pts[2].y, 1, 1);
+			nvg__vset(dst+5, pts[3].x, pts[3].y, 1, 0);
+			nvg__vset(dst+3, pts[0].x, pts[0].y, 0, 0);			
+		}
 
 		dst+=6;
 
@@ -2554,7 +2564,7 @@ void nvgStroke(NVGcontext* ctx)
 	ctx->cache->npaths = origNPaths;
 }
 
-void nvgTextureQuads(NVGcontext* ctx, int image)
+void nvgTextureQuads(NVGcontext* ctx, int image, int flipy)
 {
 	NVGstate* state = nvg__getState(ctx);
 	const NVGpath* path;
@@ -2566,7 +2576,7 @@ void nvgTextureQuads(NVGcontext* ctx, int image)
 	ctx->drawCallCount++;
 
 	nvg__flattenPaths(ctx);
-	nvg__expandQuads(ctx);
+	nvg__expandQuads(ctx, flipy);
 
 	fillPaint.image = image;
 

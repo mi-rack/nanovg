@@ -1744,7 +1744,7 @@ static void glnvg__renderFlush(void* uptr)
 		int counts[6] = {0};
 		for (i = 0; i < gl->ncalls; i++) {
 			GLNVGcall* call = &gl->calls[i];
-			counts[4] += call->pathCount;
+			counts[5] += call->pathCount;
 			glnvg__blendFuncSeparate(gl,&call->blendFunc);
 			if (call->type == GLNVG_FILL)
 			{
@@ -1773,7 +1773,7 @@ static void glnvg__renderFlush(void* uptr)
 			}
 		}
 
-		// printf("%d %d %d %d  %d\n", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]);
+		// printf("%d %d %d %d %d   %d  tex:%d\n", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], gl->ntextures);
 
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(1);

@@ -512,7 +512,7 @@ void nvgFill(NVGcontext* ctx);
 // Fills the current path with current stroke style.
 void nvgStroke(NVGcontext* ctx);
 
-void nvgTextureQuads(NVGcontext* ctx, int image);
+void nvgTextureQuads(NVGcontext* ctx, int image, int flipy);
 
 //
 // Text
