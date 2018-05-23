@@ -1962,30 +1962,29 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 				dst+=3;
 			}
 		}
-
-		cache->paths[0].nfill += (int)(dst - verts);
-		verts = dst;
 	}
 
+	cache->paths[0].nfill = (int)(dst - verts);
+	verts = dst;
+
 	// Calculate fringe
-	if (fringe)
-	for (i = 0; i < cache->npaths; i++) {
-		NVGpath* path = &cache->paths[i];
-		NVGpoint* pts = &cache->points[path->first];
-		NVGpoint* p0;
-		NVGpoint* p1;
-		float rw, lw, woff;
-		float ru, lu;
+	if (fringe) {
+		for (i = 0; i < cache->npaths; i++) {
+			NVGpath* path = &cache->paths[i];
+			NVGpoint* pts = &cache->points[path->first];
+			NVGpoint* p0;
+			NVGpoint* p1;
+			float rw, lw, woff;
+			float ru, lu;
 
-		// Calculate shape vertices.
-		woff = 0.5f*aa;
-		path->nstroke = 0;
+			// Calculate shape vertices.
+			woff = 0.5f*aa;
+			path->nstroke = 0;
 
-		NVGvertex *deg = dst;
-		if (i > 0)
-			dst += 2;
+			NVGvertex *deg = dst;
+			if (i > 0)
+				dst += 2;
 
-		// if (fringe) {
 			lw = w + woff;
 			rw = w - woff;
 			lu = 0;
@@ -2018,18 +2017,14 @@ static int nvg__expandFillMerge(NVGcontext* ctx, float w, int lineJoin, float mi
 			nvg__vset(dst, verts[0].x, verts[0].y, lu,1); dst++;
 			nvg__vset(dst, verts[1].x, verts[1].y, ru,1); dst++;
 
-		if (i > 0) {
-			deg[0] = deg[-1];
-			deg[1] = deg[2];
+			if (i > 0) {
+				deg[0] = deg[-1];
+				deg[1] = deg[2];
+			}
 		}
-
-			cache->paths[0].nstroke += (int)(dst - verts);
-			verts = dst;
-		// } else {
-		// 	// path->stroke = NULL;
-		// 	// path->nstroke = 0;
-		// }
 	}
+
+	cache->paths[0].nstroke = (int)(dst - verts);
 
 	cache->npaths = 1;
 	// cache->paths[0].nfill = (int)(dst - verts);
