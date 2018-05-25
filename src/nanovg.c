@@ -2571,6 +2571,8 @@ void nvgTextureQuads(NVGcontext* ctx, int image, int flipy)
 	ctx->drawCallCount++;
 
 	nvg__flattenPaths(ctx);
+	if (!ctx->cache->npaths)
+		return;
 	nvg__expandQuads(ctx, flipy);
 
 	fillPaint.image = image;
